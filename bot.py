@@ -27,16 +27,12 @@ CONTACT_USERNAME = "@RD3B4T"
 QR_IMAGE = "qr.png"
 PROFIT_MARGIN = 1.25
 
-# Automated UPI Gateway Configuration (Replace with your merchant gateway API details)
-UPI_GATEWAY_URL = "https://api.yourgateway.com/v1/verify_utr"
-UPI_GATEWAY_KEY = "your_gateway_secret_key"
-
 # ==============================
 # DATABASE (Text Files)
 # ==============================
 
-DB_FILE = "users.txt"
-UTR_FILE = "used_utrs.txt"
+DB_FILE = "/tmp/users.txt" if os.environ.get("RAILWAY_ENVIRONMENT") else "users.txt"
+UTR_FILE = "/tmp/used_utrs.txt" if os.environ.get("RAILWAY_ENVIRONMENT") else "used_utrs.txt"
 
 if not os.path.exists(DB_FILE):
     open(DB_FILE, "w").close()
@@ -59,14 +55,15 @@ def set_balance(user_id, amount):
     lines = []
     found = False
     try:
-        with open(DB_FILE, "r") as f:
-            for line in f:
-                parts = line.strip().split("|")
-                if len(parts) == 2 and parts[0] == str(user_id):
-                    lines.append(f"{parts[0]}|{amount}\n")
-                    found = True
-                else:
-                    lines.append(line)
+        if os.path.exists(DB_FILE):
+            with open(DB_FILE, "r") as f:
+                for line in f:
+                    parts = line.strip().split("|")
+                    if len(parts) == 2 and parts[0] == str(user_id):
+                        lines.append(f"{parts[0]}|{amount}\n")
+                        found = True
+                    else:
+                        lines.append(line)
     except Exception:
         pass
     if not found:
@@ -85,29 +82,6 @@ def is_utr_used(utr):
 def mark_utr_used(utr):
     with open(UTR_FILE, "a") as f:
         f.write(f"{utr}\n")
-
-# ==============================
-# AUTOMATED UTR VERIFIER
-# ==============================
-
-def verify_upi_payment(utr: str):
-    """
-    Calls your merchant gateway API to verify payment by UTR.
-    Must return a tuple: (is_success: bool, amount: float, message: str)
-    """
-    try:
-        # Example API call structure:
-        # payload = {"key": UPI_GATEWAY_KEY, "utr": utr}
-        # response = requests.post(UPI_GATEWAY_URL, json=payload, timeout=15)
-        # data = response.json()
-        #
-        # if data.get("status") == "SUCCESS":
-        #     return True, float(data.get("amount")), "Payment verified"
-        
-        # --- Fallback dummy mock for demonstration (remove when plugging real gateway) ---
-        return False, 0.0, "Gateway not configured. Add your merchant API endpoint in UPI_GATEWAY_URL."
-    except Exception as e:
-        return False, 0.0, f"Gateway connection error: {str(e)}"
 
 # ==============================
 # SMM API
@@ -164,6 +138,54 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # Admin Approval Handlers
+    if query.data.startswith("app_"):
+        if query.from_user.id != ADMIN_ID:
+            await query.answer("Access Denied!", show_alert=True)
+            return
+        _, uid, amt, utr = query.data.split("_")
+        uid = int(uid)
+        amt = float(amt)
+
+        if is_utr_used(utr):
+            await query.edit_message_text(f"⚠️ Yeh UTR (`{utr}`) pehle hi approve ho chuka hai!", parse_mode="Markdown")
+            return
+
+        mark_utr_used(utr)
+        new_bal = get_balance(uid) + amt
+        set_balance(uid, new_bal)
+
+        await query.edit_message_text(
+            f"✅ *APPROVED!*\n\nUser: `{uid}`\nAmount: ₹{amt:.2f}\nUTR: `{utr}`\nNew Balance: ₹{new_bal:.2f}",
+            parse_mode="Markdown"
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"🎉 *Payment Approved!*\n\n💵 ₹{amt:.2f} aapke bot wallet me add ho gaye hain.\n💰 Total Balance: ₹{new_bal:.2f}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    elif query.data.startswith("rej_"):
+        if query.from_user.id != ADMIN_ID:
+            await query.answer("Access Denied!", show_alert=True)
+            return
+        _, uid, utr = query.data.split("_")
+        await query.edit_message_text(f"❌ *REJECTED!*\nUser: `{uid}`\nUTR: `{utr}`", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(
+                chat_id=int(uid),
+                text=f"❌ Aapka payment reject kar diya gaya hai (UTR: `{utr}`).\nKripya support se contact karein: {CONTACT_USERNAME}",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+        return
+
+    # Normal User Buttons
     if query.data == "services":
         services = get_services()
         if not services or not isinstance(services, list):
@@ -191,13 +213,11 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_search"] = False
 
         caption = (
-            "💳 *AUTOMATIC UPI RECHARGE*\n\n"
+            "💳 *ADD BALANCE (UPI)*\n\n"
             f"🆔 *UPI ID:* `{UPI_ID}`\n\n"
-            "📌 *Instructions:*\n"
-            "1. Diye gaye QR / UPI ID par payment complete karein.\n"
-            "2. Payment receipt se **12-digit UTR / Ref No** copy karein.\n"
-            "3. Chat me apna **12-digit UTR number** bhej kar submit karein.\n\n"
-            "⚡ Balance 5 seconds me automatically credit ho jayega!"
+            "📌 *Steps:*\n"
+            "1. Diye gaye QR / UPI ID par payment karein.\n"
+            "2. Payment hone ke baad yahan apna **12-digit UTR / Ref No** bhejein."
         )
         if os.path.exists(QR_IMAGE):
             with open(QR_IMAGE, "rb") as photo:
@@ -209,11 +229,52 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # 1. Handle Automated UTR Submission
-    if context.user_data.get("awaiting_utr") or (len(msg) == 12 and msg.isdigit()):
-        context.user_data["awaiting_utr"] = False
-        utr = msg
+    # 1. Handle Amount after UTR
+    if context.user_data.get("awaiting_amount"):
+        try:
+            amt = float(msg)
+            if amt <= 0:
+                await update.message.reply_text("❌ Sahi amount likhein (e.g. 50 ya 100).")
+                return
+            
+            utr = context.user_data.get("temp_utr")
+            context.user_data["awaiting_amount"] = False
 
+            # Send Notification to Admin with Approve/Reject buttons
+            admin_keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"app_{user_id}_{amt}_{utr}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"rej_{user_id}_{utr}")
+                ]
+            ]
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    "🔔 *NEW DEPOSIT REQUEST*\n\n"
+                    f"👤 *User ID:* `{user_id}`\n"
+                    f"🔢 *UTR:* `{utr}`\n"
+                    f"💵 *Claimed Amount:* ₹{amt:.2f}\n\n"
+                    "Approve karne se pehle apna UPI App check karein."
+                ),
+                reply_markup=InlineKeyboardMarkup(admin_keyboard),
+                parse_mode="Markdown"
+            )
+
+            await update.message.reply_text(
+                "⏳ *Request Submitted!*\n\n"
+                f"UTR: `{utr}`\n"
+                f"Amount: ₹{amt:.2f}\n\n"
+                "Admin check karke 1-2 minute me balance add kar dega.",
+                parse_mode="Markdown"
+            )
+            return
+        except ValueError:
+            await update.message.reply_text("❌ Kripya number me amount enter karein (Jaise: 100):")
+            return
+
+    # 2. Handle UTR Submission
+    if context.user_data.get("awaiting_utr") or (len(msg) == 12 and msg.isdigit()):
+        utr = msg
         if not (len(utr) == 12 and utr.isdigit()):
             await update.message.reply_text("❌ Invalid UTR! Kripya sahi 12-digit UTR number bhejein.")
             return
@@ -222,40 +283,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Yeh UTR pehle hi use ho chuka hai!")
             return
 
-        status_msg = await update.message.reply_text("⏳ UTR verify kiya ja raha hai, kripya wait karein...")
+        context.user_data["awaiting_utr"] = False
+        context.user_data["temp_utr"] = utr
+        context.user_data["awaiting_amount"] = True
 
-        # Verify through Gateway
-        success, amount, err_msg = verify_upi_payment(utr)
-
-        if success and amount > 0:
-            # Mark UTR as used immediately to block race conditions
-            mark_utr_used(utr)
-            current_bal = get_balance(user_id)
-            new_bal = current_bal + amount
-            set_balance(user_id, new_bal)
-
-            await status_msg.edit_text(
-                f"✅ *PAYMENT VERIFIED AUTOMATICALLY!*\n\n"
-                f"🔢 *UTR:* `{utr}`\n"
-                f"💵 *Amount Added:* ₹{amount:.2f}\n"
-                f"💰 *New Balance:* ₹{new_bal:.2f}",
-                parse_mode="Markdown"
-            )
-
-            # Notify Admin
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"🔔 *Auto Deposit Alert*\nUser: `{user_id}`\nAmount: ₹{amount:.2f}\nUTR: `{utr}`",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-        else:
-            await status_msg.edit_text(f"❌ *Verification Failed*\nReason: {err_msg}", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"✅ UTR: `{utr}` note ho gaya.\n\nAb batayein aapne **kitne rupaye (₹)** transfer kiye hain?",
+            parse_mode="Markdown"
+        )
         return
 
-    # 2. Handle Search
+    # 3. Handle Search
     if context.user_data.get("awaiting_search"):
         services = get_services()
         found = []
@@ -275,7 +313,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Service nahi mili.")
         return
 
-    # 3. Handle Order Placement (format: id|link|quantity)
+    # 4. Handle Order Placement (format: id|link|quantity)
     if "|" in msg:
         parts = [p.strip() for p in msg.split("|")]
         if len(parts) != 3:
