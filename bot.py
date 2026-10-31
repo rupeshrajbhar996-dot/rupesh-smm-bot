@@ -11,29 +11,21 @@ from telegram.ext import (
     filters
 )
 
-# ==============================
-# CONFIGURATION (ENV OR DEFAULT)
-# ==============================
-
+# Configuration (Railway environment variables se uthayega ya default use karega)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8957069742:AAH0WbOeHv6EQqOlr2e33I2futoU5rqZhzU")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6081767690"))
 
-# SMM Panel Details
 SMM_API_URL = os.getenv("SMM_API_URL", "https://topfollower.in/api/v2")
 SMM_API_KEY = os.getenv("SMM_API_KEY", "53cd904c4c29f42acec5b8b52c9bc015")
 
-# Payment Details
 UPI_ID = os.getenv("UPI_ID", "6392702903@axl")
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@RD3B4T")
 QR_IMAGE = "qr.png"
 PROFIT_MARGIN = float(os.getenv("PROFIT_MARGIN", "1.25"))
 
-# ==============================
-# DATABASE (SQLite - Robust & Safe)
-# ==============================
-
 DB_PATH = "bot_data.db"
 
+# Database Init
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -75,7 +67,7 @@ def set_balance(user_id, amount):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"DB Error (set_balance): {e}")
+        print(f"DB Error: {e}")
 
 def is_utr_used(utr):
     try:
@@ -96,12 +88,9 @@ def mark_utr_used(utr):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"DB Error (mark_utr_used): {e}")
+        print(f"DB Error: {e}")
 
-# ==============================
-# SMM API
-# ==============================
-
+# SMM APIs
 def get_services():
     try:
         r = requests.post(SMM_API_URL, data={"key": SMM_API_KEY, "action": "services"}, timeout=15)
@@ -120,10 +109,7 @@ def create_order(service, link, quantity):
     except Exception as e:
         return {"error": str(e)}
 
-# ==============================
-# BOT HANDLERS
-# ==============================
-
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if get_balance(user_id) == 0:
@@ -153,7 +139,6 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Admin Approval Handlers
     if query.data.startswith("app_"):
         if query.from_user.id != ADMIN_ID:
             await query.answer("Access Denied!", show_alert=True)
@@ -177,7 +162,7 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=uid,
-                text=f"🎉 *Payment Approved!*\n\n💵 ₹{amt:.2f} aapke bot wallet me add ho gaye hain.\n💰 Total Balance: ₹{new_bal:.2f}",
+                text=f"🎉 *Payment Approved!*\n\n💵 ₹{amt:.2f} aapke wallet me add ho gaye hain.\n💰 Total Balance: ₹{new_bal:.2f}",
                 parse_mode="Markdown"
             )
         except Exception:
@@ -193,14 +178,13 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=int(uid),
-                text=f"❌ Aapka payment reject kar diya gaya hai (UTR: `{utr}`).\nKripya support se contact karein: {CONTACT_USERNAME}",
+                text=f"❌ Aapka payment reject kar diya gaya hai (UTR: `{utr}`).\nSupport: {CONTACT_USERNAME}",
                 parse_mode="Markdown"
             )
         except Exception:
             pass
         return
 
-    # User Actions
     if query.data == "services":
         services = get_services()
         if not services or not isinstance(services, list):
@@ -244,7 +228,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # 1. Amount Verification
     if context.user_data.get("awaiting_amount"):
         try:
             amt = float(msg)
@@ -286,11 +269,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Kripya number me amount enter karein (Jaise: 100):")
             return
 
-    # 2. UTR Handling
     if context.user_data.get("awaiting_utr") or (len(msg) == 12 and msg.isdigit()):
         utr = msg
         if not (len(utr) == 12 and utr.isdigit()):
-            await update.message.reply_text("❌ Invalid UTR! Kripya sahi 12-digit UTR number bhejein.")
+            await update.message.reply_text("❌ Invalid UTR! Sahi 12-digit number bhejein.")
             return
 
         if is_utr_used(utr):
@@ -307,7 +289,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3. Search Services
     if context.user_data.get("awaiting_search"):
         services = get_services()
         found = []
@@ -327,7 +308,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Service nahi mili.")
         return
 
-    # 4. Order Execution (id|link|quantity)
     if "|" in msg:
         parts = [p.strip() for p in msg.split("|")]
         if len(parts) != 3:
@@ -411,8 +391,9 @@ def main():
     app.add_handler(CallbackQueryHandler(buttons_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    print(f"🚀 Bot is running...")
+    print("🚀 Bot is running...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+        
