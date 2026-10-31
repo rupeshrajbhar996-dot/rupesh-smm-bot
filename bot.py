@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,77 +12,91 @@ from telegram.ext import (
 )
 
 # ==============================
-# CONFIGURATION
+# CONFIGURATION (ENV OR DEFAULT)
 # ==============================
 
-BOT_TOKEN = "8957069742:AAH0WbOeHv6EQqOlr2e33I2futoU5rqZhzU"
-ADMIN_ID = 6081767690
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8957069742:AAH0WbOeHv6EQqOlr2e33I2futoU5rqZhzU")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6081767690"))
 
 # SMM Panel Details
-SMM_API_URL = "https://topfollower.in/api/v2"
-SMM_API_KEY = "53cd904c4c29f42acec5b8b52c9bc015"
+SMM_API_URL = os.getenv("SMM_API_URL", "https://topfollower.in/api/v2")
+SMM_API_KEY = os.getenv("SMM_API_KEY", "53cd904c4c29f42acec5b8b52c9bc015")
 
 # Payment Details
-UPI_ID = "6392702903@axl"
-CONTACT_USERNAME = "@RD3B4T"
+UPI_ID = os.getenv("UPI_ID", "6392702903@axl")
+CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "@RD3B4T")
 QR_IMAGE = "qr.png"
-PROFIT_MARGIN = 1.25
+PROFIT_MARGIN = float(os.getenv("PROFIT_MARGIN", "1.25"))
 
 # ==============================
-# DATABASE (Text Files)
+# DATABASE (SQLite - Robust & Safe)
 # ==============================
 
-DB_FILE = "/tmp/users.txt" if os.environ.get("RAILWAY_ENVIRONMENT") else "users.txt"
-UTR_FILE = "/tmp/used_utrs.txt" if os.environ.get("RAILWAY_ENVIRONMENT") else "used_utrs.txt"
+DB_PATH = "bot_data.db"
 
-if not os.path.exists(DB_FILE):
-    open(DB_FILE, "w").close()
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            balance REAL DEFAULT 0.0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS used_utrs (
+            utr TEXT PRIMARY KEY
+        )
+    """)
+    conn.commit()
+    conn.close()
 
-if not os.path.exists(UTR_FILE):
-    open(UTR_FILE, "w").close()
+init_db()
 
 def get_balance(user_id):
     try:
-        with open(DB_FILE, "r") as f:
-            for line in f:
-                parts = line.strip().split("|")
-                if len(parts) == 2 and parts[0] == str(user_id):
-                    return float(parts[1])
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0.0
     except Exception:
-        pass
-    return 0.0
+        return 0.0
 
 def set_balance(user_id, amount):
-    lines = []
-    found = False
     try:
-        if os.path.exists(DB_FILE):
-            with open(DB_FILE, "r") as f:
-                for line in f:
-                    parts = line.strip().split("|")
-                    if len(parts) == 2 and parts[0] == str(user_id):
-                        lines.append(f"{parts[0]}|{amount}\n")
-                        found = True
-                    else:
-                        lines.append(line)
-    except Exception:
-        pass
-    if not found:
-        lines.append(f"{user_id}|{amount}\n")
-    with open(DB_FILE, "w") as f:
-        f.writelines(lines)
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO users (user_id, balance) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET balance = excluded.balance
+        """, (user_id, amount))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB Error (set_balance): {e}")
 
 def is_utr_used(utr):
     try:
-        with open(UTR_FILE, "r") as f:
-            utrs = [line.strip() for line in f.readlines()]
-            return utr in utrs
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT utr FROM used_utrs WHERE utr = ?", (utr,))
+        row = cursor.fetchone()
+        conn.close()
+        return row is not None
     except Exception:
         return False
 
 def mark_utr_used(utr):
-    with open(UTR_FILE, "a") as f:
-        f.write(f"{utr}\n")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO used_utrs (utr) VALUES (?)", (utr,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB Error (mark_utr_used): {e}")
 
 # ==============================
 # SMM API
@@ -185,7 +200,7 @@ async def buttons_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # Normal User Buttons
+    # User Actions
     if query.data == "services":
         services = get_services()
         if not services or not isinstance(services, list):
@@ -229,7 +244,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # 1. Handle Amount after UTR
+    # 1. Amount Verification
     if context.user_data.get("awaiting_amount"):
         try:
             amt = float(msg)
@@ -240,7 +255,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             utr = context.user_data.get("temp_utr")
             context.user_data["awaiting_amount"] = False
 
-            # Send Notification to Admin with Approve/Reject buttons
             admin_keyboard = [
                 [
                     InlineKeyboardButton("✅ Approve", callback_data=f"app_{user_id}_{amt}_{utr}"),
@@ -264,7 +278,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏳ *Request Submitted!*\n\n"
                 f"UTR: `{utr}`\n"
                 f"Amount: ₹{amt:.2f}\n\n"
-                "Admin check karke 1-2 minute me balance add kar dega.",
+                "Admin check karke balance add kar dega.",
                 parse_mode="Markdown"
             )
             return
@@ -272,7 +286,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Kripya number me amount enter karein (Jaise: 100):")
             return
 
-    # 2. Handle UTR Submission
+    # 2. UTR Handling
     if context.user_data.get("awaiting_utr") or (len(msg) == 12 and msg.isdigit()):
         utr = msg
         if not (len(utr) == 12 and utr.isdigit()):
@@ -293,7 +307,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 3. Handle Search
+    # 3. Search Services
     if context.user_data.get("awaiting_search"):
         services = get_services()
         found = []
@@ -313,7 +327,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Service nahi mili.")
         return
 
-    # 4. Handle Order Placement (format: id|link|quantity)
+    # 4. Order Execution (id|link|quantity)
     if "|" in msg:
         parts = [p.strip() for p in msg.split("|")]
         if len(parts) != 3:
@@ -397,8 +411,8 @@ def main():
     app.add_handler(CallbackQueryHandler(buttons_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    print(f"🚀 Bot is running with UPI ID: {UPI_ID}")
-    app.run_polling()
+    print(f"🚀 Bot is running...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
